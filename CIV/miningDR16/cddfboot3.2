@@ -1,0 +1,98 @@
+%% C IV CDDF + Beta Slope + Omega_CIV — With Valid Fit Mask and Overlay
+clearvars; close all; clc;
+
+% Load data
+load('sampled_logN_per_absorber.mat');
+load('processed_qsos_dr16_parameters.mat');
+
+%% Define binning over full range
+logN_edges = 12:0.25:17;
+dlogN = diff(logN_edges(1:2));
+logN_centers = logN_edges(1:end-1) + dlogN/2;
+N_centers = 10.^logN_centers;
+n_bins = numel(logN_centers);
+
+%% Compute ΔX
+Omega_M = 0.3; Omega_Lambda = 0.7; H0 = 70; c = 299792.458;
+dX_dz = @(z) (1+z).^2 ./ sqrt(Omega_M*(1+z).^3 + Omega_Lambda);
+min_z = savingCat.all_min_z_c4s(:); max_z = savingCat.all_max_z_c4s(:);
+n_qsos = numel(min_z); delta_X = zeros(n_qsos,1);
+for i = 1:n_qsos
+    if min_z(i) < max_z(i)
+        zgrid = linspace(min_z(i), max_z(i), 200);
+        delta_X(i) = trapz(zgrid, dX_dz(zgrid));
+    end
+end
+total_dX = sum(delta_X);
+
+%% Stack all logN samples and create CDDF
+all_logNs = vertcat(sampledAbsorbers.logN_samples);
+n_trials = 100;
+f_trials = zeros(n_trials, n_bins);
+
+for t = 1:n_trials
+    idx = randsample(numel(all_logNs), numel(all_logNs), true);
+    logN_trial = all_logNs(idx);
+    f_counts = histcounts(logN_trial, logN_edges);
+    f = f_counts ./ (dlogN * total_dX);
+    f = f ./ (N_centers .* log(10));
+    f_trials(t, :) = f;
+end
+
+f_mean = mean(f_trials, 1);
+f_min  = min(f_trials, [], 1);
+f_max  = max(f_trials, [], 1);
+
+logf_mean = log10(f_mean);
+logf_min  = log10(f_min);
+logf_max  = log10(f_max);
+
+%% Plot CDDF using error bars
+logf_err_low  = logf_mean - logf_min;
+logf_err_high = logf_max - logf_mean;
+
+figure;
+errorbar(logN_centers, logf_mean, logf_err_low, logf_err_high, ...
+    'k^', 'MarkerFaceColor', 'k', 'CapSize', 0, 'LineStyle', 'none');
+xlabel('$\\log_{10}\\left[N_{\\mathrm{C\\,IV}} / \\mathrm{cm}^{-2}\\right]$', 'Interpreter','latex');
+ylabel('$\\log_{10}[f(N,X)]$', 'Interpreter','latex');
+grid on;
+
+%% Fit slope beta over a valid range (excluding -Inf)
+finite_mask = isfinite(logf_mean);
+
+% Choose your range here:
+fit_mask = logN_centers >= 12 & logN_centers <= 17.0 & finite_mask;
+
+x_fit = logN_centers(fit_mask);
+y_fit = logf_mean(fit_mask);
+
+p = polyfit(x_fit, y_fit, 1);
+beta = -p(1);
+y_line = polyval(p, x_fit);
+hold on;
+plot(x_fit, y_line, 'r--', 'LineWidth', 1.5);
+
+fprintf('Best-fit slope beta = %.3f (range: %.2f–%.2f)\n', beta, min(x_fit), max(x_fit));
+
+%% Omega_CIV with bootstrap
+A_C = 12.0107; m_u = 1.66053906660e-24;
+m_CIV = A_C * m_u;
+H0_cgs = H0 * 1e5 / (3.085677581e24);
+c_cgs  = c  * 1e5;
+G = 6.67430e-8;
+rho_crit = 3 * H0_cgs^2 / (8 * pi * G);
+prefac = (H0_cgs * m_CIV) / (c_cgs * rho_crit);
+
+nboot = 500;
+Omega_boot = zeros(nboot, 1);
+for b = 1:nboot
+    idx = randsample(numel(all_logNs), numel(all_logNs), true);
+    N_vals = 10.^all_logNs(idx);
+    Omega_boot(b) = prefac * sum(N_vals) / total_dX;
+end
+
+Omega_CIV_mean = mean(Omega_boot);
+Omega_CIV_std  = std(Omega_boot);
+
+fprintf('Omega_CIV = %.3e ± %.3e (bootstrap 1σ)\n', Omega_CIV_mean, Omega_CIV_std);
